@@ -1,0 +1,34 @@
+diff --git a/libs/estdlib/src/serial_dist.erl b/libs/estdlib/src/serial_dist.erl
+index 84f84ac..eab4cf4 100644
+--- a/libs/estdlib/src/serial_dist.erl
++++ b/libs/estdlib/src/serial_dist.erl
+@@ -338,6 +338,14 @@ link_manager(Coordinator, UartPort, UartMod, Buffer) ->
+                 <<Buffer/binary, Data/binary>>;
+             {error, timeout} ->
+                 Buffer;
++            {error, ealready} ->
++                %% The UART driver still has a reader registered: the reader
++                %% process of a controller that just died (CRC error, tick
++                %% timeout, peer restart) was blocked in read/1 and the
++                %% driver was never told. Clear it and carry on, otherwise
++                %% this link manager dies and the port goes silent for good.
++                clear_stale_reader(UartPort),
++                Buffer;
+             {error, Reason} ->
+                 io:format("serial_dist: UART read error: ~p~n", [Reason]),
+                 exit({uart_read_error, Reason})
+@@ -402,6 +410,14 @@ do_setup_handshake(Coordinator, UartPort, UartMod, SetupPid) ->
+             link_manager(Coordinator, UartPort, UartMod, <<>>)
+     end.
+ 
++%% Port-based UART drivers (esp32, unix) track one pending reader and answer
++%% `ealready' to anyone else; `cancel_read' releases a reader that died.
++clear_stale_reader(UartPort) when is_port(UartPort) ->
++    catch port:call(UartPort, cancel_read),
++    ok;
++clear_stale_reader(_UartPort) ->
++    ok.
++
+ flush_setup_messages() ->
+     receive
+         {setup, _} -> flush_setup_messages()

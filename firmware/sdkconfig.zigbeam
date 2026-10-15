@@ -1,0 +1,28 @@
+# Extra sdkconfig defaults layered on top of AtomVM's for the zigbeam firmware.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+
+# Zigbee end device on the native 802.15.4 radio, coexisting with Wi-Fi.
+CONFIG_ZB_ENABLED=y
+CONFIG_ZB_ZED=y
+CONFIG_ZB_RADIO_NATIVE=y
+CONFIG_IEEE802154_ENABLED=y
+CONFIG_ESP_COEX_ENABLED=y
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# Zigbee stack keeps its own state in NVS-like partitions; keep NVS flash on.
+CONFIG_NVS_ENCRYPTION=n
+
+# Trim AtomVM components we don't use on this board to make room for Zigbee.
+CONFIG_AVM_ENABLE_ADC_NIFS=n
+CONFIG_AVM_ENABLE_LEDC_NIFS=n
+CONFIG_AVM_ENABLE_OTP_SSL_NIFS=n
+
+# Serial distribution needs the UART port driver (it also drives the USB
+# Serial/JTAG peripheral as "USB_SERIAL_JTAG").
+CONFIG_AVM_ENABLE_UART_PORT_DRIVER=y
+
+# Keep the console on UART0 only (GPIO16/17 = XIAO D6/D7). The USB Serial/JTAG
+# port carries Erlang distribution, so no log output may go there.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

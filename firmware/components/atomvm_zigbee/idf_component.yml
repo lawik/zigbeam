@@ -1,0 +1,3 @@
+dependencies:
+  idf: ">=5.5"
+  espressif/esp-zigbee-lib: "~2.0.4"

@@ -1,0 +1,16 @@
+diff --git a/src/platforms/esp32/CMakeLists.txt b/src/platforms/esp32/CMakeLists.txt
+index 2e2a86b..a41378d 100644
+--- a/src/platforms/esp32/CMakeLists.txt
++++ b/src/platforms/esp32/CMakeLists.txt
+@@ -69,7 +69,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig")
+     endif()
+ endif()
+ 
+-if (_jit_partition)
++if (DEFINED AVM_PARTITION_TABLE_FILENAME)
++    # Caller-provided partition table (e.g. -DAVM_PARTITION_TABLE_FILENAME=partitions-foo.csv)
++    message(STATUS "Using caller-provided partition table ${AVM_PARTITION_TABLE_FILENAME}")
++elseif (_jit_partition)
+     # JIT partition layout: fully AOT boot.avm (estdlib + esp32init, no JIT compiler)
+     set(AVM_PARTITION_TABLE_FILENAME "partitions-jit.csv")
+ elseif (ATOMVM_ELIXIR_SUPPORT)

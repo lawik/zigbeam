@@ -1,0 +1,30 @@
+# Mix build output, deps, docs, coverage
+/_build/
+/cover/
+/deps/
+/doc/
+/.fetch
+/tmp/
+erl_crash.dump
+*.ez
+*.beam
+zigbeam-*.tar
+
+# Editor / tooling
+.elixir_ls/
+.envrc
+
+# Local secrets (Wi-Fi credentials etc.). Copy config/wifi.secret.exs.example
+# to config/wifi.secret.exs and fill it in.
+/config/*.secret.exs
+
+# Packed AtomVM apps (`mix atomvm.packbeam` / `mix atomvm.esp32.flash`)
+*.avm
+
+# Firmware build output. The actual ESP-IDF build happens in the AtomVM tree
+# (see firmware/env.sh), but keep any in-place build out too.
+/firmware/build/
+/firmware/*.log
+/firmware_images/
+/firmware/sdkconfig
+/firmware/sdkconfig.old

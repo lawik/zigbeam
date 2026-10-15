@@ -1,0 +1,7 @@
+menu "AtomVM Zigbee port driver"
+
+config AVM_ENABLE_ZIGBEE_PORT_DRIVER
+    bool "Enable the zigbee port driver (requires CONFIG_ZB_ENABLED)"
+    default y
+
+endmenu
