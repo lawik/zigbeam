@@ -1,0 +1,23 @@
+diff --git a/libs/estdlib/src/net_kernel.erl b/libs/estdlib/src/net_kernel.erl
+index 0a4033a..fa41c66 100644
+--- a/libs/estdlib/src/net_kernel.erl
++++ b/libs/estdlib/src/net_kernel.erl
+@@ -338,8 +338,16 @@ handle_info(
+     NewConnections =
+         case maps:find(OtherNode, Connections) of
+             error ->
+-                ProtoDist:setup(OtherNode, normal, MyNode, Longnames, ?SETUPTIME),
+-                maps:put(OtherNode, {pending, undefined, DHandle}, Connections);
++                %% Link the setup process (as OTP does): if the handshake fails
++                %% before mark_pending, its EXIT removes the pending entry so
++                %% a later send can trigger a new setup instead of waiting on a
++                %% connection that will never come.
++                SetupPid = ProtoDist:setup(OtherNode, normal, MyNode, Longnames, ?SETUPTIME),
++                case is_pid(SetupPid) of
++                    true -> link(SetupPid);
++                    false -> ok
++                end,
++                maps:put(OtherNode, {pending, SetupPid, DHandle}, Connections);
+             {ok, {pending, ConnPid, _}} ->
+                 maps:put(OtherNode, {pending, ConnPid, DHandle}, Connections);
+             {ok, {alive, _ConnPid, _Address}} ->

@@ -24,5 +24,5 @@ CONFIG_AVM_ENABLE_UART_PORT_DRIVER=y
 
 # Keep the console on UART0 only (GPIO16/17 = XIAO D6/D7). The USB Serial/JTAG
 # port carries Erlang distribution, so no log output may go there.
-CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

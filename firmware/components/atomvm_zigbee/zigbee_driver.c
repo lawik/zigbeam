@@ -22,6 +22,7 @@
 #include <freertos/task.h>
 #include <nvs_flash.h>
 #include <esp_timer.h>
+#include <driver/gpio.h>
 
 #include <esp_zigbee.h>
 #include <ezbee/zha.h>
@@ -65,6 +66,14 @@ static const char *const already_started_atom = "\xF" "already_started";
 static const char *const not_started_atom = "\xB" "not_started";
 static const char *const zcl_error_atom = "\x9" "zcl_error";
 static const char *const zb_error_atom = "\x8" "zb_error";
+static const char *const aps_data_atom = "\x8" "aps_data";
+static const char *const aps_confirm_atom = "\xB" "aps_confirm";
+
+/* Raw APS data path used for Erlang distribution between boards: HA profile,
+ * a manufacturer-specific cluster id, our own endpoint on both ends. */
+#define ZIGBEAM_APS_PROFILE 0x0104
+#define ZIGBEAM_APS_CLUSTER 0xFC42
+#define ZIGBEAM_APS_MAX_ASDU 1024
 
 enum zigbee_cmd
 {
@@ -75,6 +84,8 @@ enum zigbee_cmd
     ZigbeeLeaveCmd,
     ZigbeeFactoryResetCmd,
     ZigbeeSetAttributeCmd,
+    ZigbeeApsSubscribeCmd,
+    ZigbeeApsSendCmd,
     ZigbeeCloseCmd
 };
 
@@ -85,6 +96,8 @@ static const AtomStringIntPair cmd_table[] = {
     { ATOM_STR("\x5", "leave"), ZigbeeLeaveCmd },
     { ATOM_STR("\xD", "factory_reset"), ZigbeeFactoryResetCmd },
     { ATOM_STR("\xD", "set_attribute"), ZigbeeSetAttributeCmd },
+    { ATOM_STR("\xD", "aps_subscribe"), ZigbeeApsSubscribeCmd },
+    { ATOM_STR("\x8", "aps_send"), ZigbeeApsSendCmd },
     { ATOM_STR("\x5", "close"), ZigbeeCloseCmd },
     SELECT_INT_DEFAULT(ZigbeeInvalidCmd)
 };
@@ -93,6 +106,7 @@ struct ZigbeeData
 {
     GlobalContext *global;
     int32_t owner_process_id;
+    int32_t aps_process_id; /* receiver of {zigbee, {aps_data, ..}} / {aps_confirm, ..}; 0 = owner */
     bool started;
     bool auto_join;
     uint8_t endpoint;
@@ -139,6 +153,8 @@ static void ensure_atoms(GlobalContext *global)
     make_atom(global, endpoint_atom);
     make_atom(global, zcl_error_atom);
     make_atom(global, zb_error_atom);
+    make_atom(global, aps_data_atom);
+    make_atom(global, aps_confirm_atom);
 }
 
 static term error_tuple(Context *ctx, term reason)
@@ -267,6 +283,58 @@ static void send_signal(uint16_t signal_type, int status)
         term_put_tuple_element(payload, 1, term_from_int(signal_type));
         term_put_tuple_element(payload, 2, term_from_int(status));
         send_event_tuple(payload, &heap);
+    }
+    END_WITH_STACK_HEAP(heap, d->global);
+}
+
+static void send_to_aps_receiver(term payload, Heap *heap)
+{
+    struct ZigbeeData *d = zb_data;
+    int32_t pid = d->aps_process_id ? d->aps_process_id : d->owner_process_id;
+    term msg = term_alloc_tuple(2, heap);
+    term_put_tuple_element(msg, 0, existing_atom(d->global, zigbee_atom));
+    term_put_tuple_element(msg, 1, payload);
+    port_send_message_from_task(d->global, term_from_local_process_id(pid), msg);
+}
+
+/* APSDE-DATA.indication on the Zigbee task: {zigbee, {aps_data, SrcShort, Binary}} */
+static bool aps_indication_handler(const ezb_apsde_data_ind_t *ind)
+{
+    if (ind->profile_id != ZIGBEAM_APS_PROFILE || ind->cluster_id != ZIGBEAM_APS_CLUSTER) {
+        return false;
+    }
+    if (ind->status != 0 || ind->src_address.addr_mode != EZB_ADDR_MODE_SHORT) {
+        return true;
+    }
+    struct ZigbeeData *d = zb_data;
+    uint16_t len = ind->asdu_length;
+    BEGIN_WITH_STACK_HEAP(TUPLE_SIZE(2) + TUPLE_SIZE(3) + TERM_BINARY_HEAP_SIZE(len), heap);
+    {
+        term payload = term_alloc_tuple(3, &heap);
+        term_put_tuple_element(payload, 0, existing_atom(d->global, aps_data_atom));
+        term_put_tuple_element(payload, 1, term_from_int(ind->src_address.u.short_addr));
+        term_put_tuple_element(payload, 2, term_from_literal_binary(ind->asdu, len, &heap, d->global));
+        send_to_aps_receiver(payload, &heap);
+    }
+    END_WITH_STACK_HEAP(heap, d->global);
+    return true;
+}
+
+/* APSDE-DATA.confirm on the Zigbee task: {zigbee, {aps_confirm, DstShort, Status}} */
+static void aps_confirm_handler(const ezb_apsde_data_confirm_t *confirm)
+{
+    if (confirm->profile_id != ZIGBEAM_APS_PROFILE || confirm->cluster_id != ZIGBEAM_APS_CLUSTER) {
+        return;
+    }
+    struct ZigbeeData *d = zb_data;
+    int dst = confirm->dst_address.addr_mode == EZB_ADDR_MODE_SHORT ? confirm->dst_address.u.short_addr : -1;
+    BEGIN_WITH_STACK_HEAP(TUPLE_SIZE(2) + TUPLE_SIZE(3), heap);
+    {
+        term payload = term_alloc_tuple(3, &heap);
+        term_put_tuple_element(payload, 0, existing_atom(d->global, aps_confirm_atom));
+        term_put_tuple_element(payload, 1, term_from_int(dst));
+        term_put_tuple_element(payload, 2, term_from_int(confirm->status));
+        send_to_aps_receiver(payload, &heap);
     }
     END_WITH_STACK_HEAP(heap, d->global);
 }
@@ -450,6 +518,8 @@ static esp_err_t create_device(struct ZigbeeData *d)
         return err;
     }
     ezb_zcl_core_action_handler_register(zcl_action_handler);
+    ezb_apsde_data_indication_handler_register(aps_indication_handler);
+    ezb_apsde_data_confirm_handler_register(aps_confirm_handler);
     return ESP_OK;
 }
 
@@ -463,7 +533,7 @@ static void zigbee_task(void *arg)
             .install_code_policy = false,
             .zed_config = {
                 .ed_timeout = EZB_NWK_ED_TIMEOUT_64MIN,
-                .keep_alive = 4000,
+                .keep_alive = 250, /* poll the parent often: frames for us wait there until we poll */
             },
         },
         .platform_config = {
@@ -475,6 +545,10 @@ static void zigbee_task(void *arg)
     };
 
     ESP_ERROR_CHECK(esp_zigbee_init(&config));
+    /* Keep the receiver on: frames for us are delivered as they arrive instead
+     * of waiting at the parent for our next poll, which matters for the
+     * distribution link (latency per frame ~ms instead of ~keep_alive). */
+    ezb_set_rx_on_when_idle(true);
     ezb_aps_secur_enable_distributed_security(false);
     ESP_ERROR_CHECK(ezb_bdb_set_primary_channel_set(d->channel_mask));
     ESP_ERROR_CHECK(ezb_bdb_set_secondary_channel_set(ZB_ALL_CHANNELS_MASK));
@@ -528,6 +602,17 @@ static term do_start(Context *ctx, int32_t caller_pid, term req)
         term_to_zcl_string(v, d->model, global);
     }
 
+    /* Seeed XIAO ESP32-C6 RF switch: GPIO3 low enables the switch, GPIO14
+     * selects the antenna (low = onboard ceramic, high = external U.FL).
+     * Both float after reset; on some boards that leaves the radio deaf
+     * (steering fails with NO_NETWORK), so drive them explicitly. */
+    gpio_reset_pin(GPIO_NUM_3);
+    gpio_set_direction(GPIO_NUM_3, GPIO_MODE_OUTPUT);
+    gpio_set_level(GPIO_NUM_3, 0);
+    gpio_reset_pin(GPIO_NUM_14);
+    gpio_set_direction(GPIO_NUM_14, GPIO_MODE_OUTPUT);
+    gpio_set_level(GPIO_NUM_14, 0);
+
     esp_err_t err = nvs_flash_init_partition(ZB_STORAGE_PARTITION);
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase_partition(ZB_STORAGE_PARTITION));
@@ -568,6 +653,10 @@ struct PendingCmd
     uint16_t cluster_id;
     uint16_t attr_id;
     uint8_t value[8];
+    /* aps_send */
+    uint16_t dst_short;
+    uint16_t data_len;
+    uint8_t *data;
 };
 
 static term kv_heap(Heap *heap, GlobalContext *global, const char *key_atom, term value, term tail)
@@ -701,9 +790,33 @@ static void run_pending_cmd(void *arg)
             reply_from_task(pc, 0, build_ok);
         } break;
 
+        case ZigbeeApsSendCmd: {
+            ezb_apsde_data_req_t req;
+            memset(&req, 0, sizeof(req));
+            req.dst_address.addr_mode = EZB_ADDR_MODE_SHORT;
+            req.dst_address.u.short_addr = pc->dst_short;
+            req.src_endpoint = d->endpoint;
+            req.dst_endpoint = d->endpoint;
+            req.cluster_id = ZIGBEAM_APS_CLUSTER;
+            req.profile_id = ZIGBEAM_APS_PROFILE;
+            req.radius = 0;
+            req.tx_options = (pc->dst_short >= 0xFFF8) ? 0 : (EZB_APSDE_TX_OPT_ACK_TX | EZB_APSDE_TX_OPT_FRAG_PERMITTED);
+            req.asdu_length = pc->data_len;
+            req.asdu = pc->data;
+            ezb_err_t err = ezb_apsde_data_request(&req);
+            if (err == EZB_ERR_NONE) {
+                reply_from_task(pc, 0, build_ok);
+            } else {
+                pending_error_tag = zb_error_atom;
+                pending_error_code = err;
+                reply_from_task(pc, ERROR_PAYLOAD_SIZE, build_error);
+            }
+        } break;
+
         default:
             break;
     }
+    free(pc->data);
     free(pc);
 }
 
@@ -762,7 +875,31 @@ static term dispatch_to_task(Context *ctx, enum zigbee_cmd cmd, GenMessage *gen_
         }
     }
 
+    if (cmd == ZigbeeApsSendCmd) {
+        term req = gen_message->req;
+        if (term_get_tuple_arity(req) != 3) {
+            free(pc);
+            return error_tuple(ctx, BADARG_ATOM);
+        }
+        term dst_t = term_get_tuple_element(req, 1);
+        term data_t = term_get_tuple_element(req, 2);
+        if (!term_is_integer(dst_t) || !term_is_binary(data_t)
+            || term_binary_size(data_t) > ZIGBEAM_APS_MAX_ASDU) {
+            free(pc);
+            return error_tuple(ctx, BADARG_ATOM);
+        }
+        pc->dst_short = (uint16_t) term_to_int(dst_t);
+        pc->data_len = (uint16_t) term_binary_size(data_t);
+        pc->data = malloc(pc->data_len ? pc->data_len : 1);
+        if (IS_NULL_PTR(pc->data)) {
+            free(pc);
+            return error_tuple(ctx, OUT_OF_MEMORY_ATOM);
+        }
+        memcpy(pc->data, term_binary_data(data_t), pc->data_len);
+    }
+
     if (esp_zigbee_task_queue_post(run_pending_cmd, pc) != ESP_OK) {
+        free(pc->data);
         free(pc);
         return error_atom_tuple(ctx, zb_error_atom);
     }
@@ -794,8 +931,21 @@ static NativeHandlerResult consume_zigbee_mailbox(Context *ctx)
         case ZigbeeLeaveCmd:
         case ZigbeeFactoryResetCmd:
         case ZigbeeSetAttributeCmd:
+        case ZigbeeApsSendCmd:
             ret = dispatch_to_task(ctx, cmd, &gen_message);
             break;
+        case ZigbeeApsSubscribeCmd: {
+            /* {aps_subscribe, Pid}: route APS data/confirm events to Pid */
+            struct ZigbeeData *d = ctx->platform_data;
+            term pid_t = term_is_tuple(req) && term_get_tuple_arity(req) == 2
+                ? term_get_tuple_element(req, 1) : term_invalid_term();
+            if (term_is_pid(pid_t)) {
+                d->aps_process_id = term_to_local_process_id(pid_t);
+                ret = OK_ATOM;
+            } else {
+                ret = error_tuple(ctx, BADARG_ATOM);
+            }
+        } break;
         case ZigbeeCloseCmd:
             ret = OK_ATOM;
             break;

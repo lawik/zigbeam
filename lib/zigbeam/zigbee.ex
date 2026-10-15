@@ -96,4 +96,10 @@ defmodule Zigbeam.Zigbee do
   @doc "Close the port. The stack keeps running; this just drops the Erlang handle."
   @spec close(port_ref()) :: :ok
   def close(port), do: :port.call(port, :close, @timeout)
+
+  @doc "Route `{:zigbee, {:aps_data, src, bin}}` and `{:zigbee, {:aps_confirm, dst, status}}` to `pid`."
+  def aps_subscribe(port, pid), do: :port.call(port, {:aps_subscribe, pid}, @timeout)
+
+  @doc "Send up to 128 bytes as a raw APS unicast (short address; 0xFFFF broadcasts) on the zigbeam cluster."
+  def aps_send(port, dst_short, data) when is_binary(data), do: :port.call(port, {:aps_send, dst_short, data}, @timeout)
 end

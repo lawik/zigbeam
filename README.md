@@ -18,6 +18,11 @@ config/config.exs        transport choice, UART pins (compile-time)
 config/wifi.secret.exs   Wi-Fi credentials, git-ignored (see the .example file)
 lib/zigbeam/server.ex    registered :zigbeam process; owns the Zigbee port, fans out events
 lib/zigbeam/zigbee.ex    Elixir API for the port driver
+lib/zigbeam/display.ex   SSD1306 OLED on the XIAO Expansion Board (status screen)
+lib/zigbeam/zigbee_link.ex  packet transport between boards over raw APS frames (peer discovery)
+lib/zigbeam/ping_pong.ex    demo: two boards pass a counter over distribution
+src/zigbee_dist.erl      proto_dist module: Erlang distribution over Zigbee (+ serial_dist passthrough)
+src/zigbee_dist_controller.erl  one dist connection = one Zigbee peer
 firmware/                custom AtomVM firmware build for the C6 (see below)
 scripts/host.exs         talk to the board from a host BEAM
 ```
@@ -111,6 +116,43 @@ Node.connect(:"zigbeam@192.168.3.70")
 send({:zigbeam, :"zigbeam@192.168.3.70"}, {:subscribe, self()})
 ```
 
+### Transport: Zigbee (`transport: :zigbee`, current default)
+
+Two boards on the same PAN run Erlang distribution over Zigbee itself. Boot order: Zigbee stack ->
+node name `zb<last two MAC bytes>@zigbee.local` from the IEEE address -> `Zigbeam.ZigbeeLink`
+(broadcasts a hello with the node name until a peer answers) -> `net_kernel` with
+`proto_dist: :zigbee_dist` -> `Zigbeam.PingPong`.
+
+Wire format: every distribution packet (handshake message, data, tick) is one APS unicast on the
+HA profile, manufacturer cluster 0xFC42, endpoint 10, with a 2-byte header `<<type, seq>>`
+(type 0 whole packet, 3/4 fragment more/last, 1 hello, 2 hello-ack). No framing or CRC on top:
+the MAC checks frames and APS acks and retries each one; `seq` lets the receiver drop a frame
+whose ack was lost. Packets above 120 bytes are split by the link; APS fragmentation is enabled
+too. A broadcast hello from a known peer means it rebooted, so its connection is torn down.
+
+Sending to `{:pingpong, peer}` auto-connects (the VM asks net_kernel, which calls
+`zigbee_dist:setup/5`). The board with the smaller node name serves first; each side holds the
+ball 500 ms, so about 3 exchanges per 5 s, i.e. ~300 ms per hop including the APS ack.
+
+The driver polls the parent every 250 ms (`keep_alive`): the boards joined as end devices and
+the parent buffers frames for them until they poll, even with rx-on-when-idle set afterwards.
+A fresh join with the current firmware announces rx-on-when-idle and should remove that delay.
+
+The console is on the USB port in this mode (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`), so there is
+no USB distribution link; `zigbee_dist` can still add one by passing serial_dist's `uart_opts`
+in `avm_dist_opts` if the console is moved back to UART0. Watch the console with
+`firmware/monitor.sh /dev/ttyACMn` or any serial terminal at 115200.
+
+Wi-Fi is never started in this transport.
+
+Robustness: `Zigbeam.PingPong` runs under a tiny restart loop in `Zigbeam.start`; if it dies the
+reason goes to the console, the boot log (`Zigbeam.boot_log/0`) and the display, and it restarts
+after 2 s. When a peer reboots, the stale connection is dropped and the serve re-establishes it
+(verified with repeated resets). AtomVM prints a crash report when a connection's supervising
+process exits after its controller stopped; that is the normal end of a connection, not a bug.
+Patch `firmware/patches/0003` makes AtomVM's `net_kernel` link the setup process (as OTP does), so
+a handshake that fails before the peer answered does not leave the node stuck as pending forever.
+
 ## Zigbee
 
 The device starts as a factory-new End Device and immediately does network steering, so open your
@@ -130,6 +172,38 @@ Events delivered to subscribers (and printed on the console):
 Port protocol (`Zigbeam.Zigbee`): `start/1`, `status/1`, `join/1`, `leave/1`, `factory_reset/1`,
 `set_attribute/4`, `close/1`. `set_attribute(port, 0x0006, 0x0000, true)` sets the on/off attribute
 and sends a ZCL report to bound devices.
+
+### Antenna
+
+The XIAO ESP32-C6 has an RF switch: GPIO3 low enables it, GPIO14 selects the antenna (low = onboard
+ceramic, high = external U.FL). Both pins float after reset and on some boards that leaves the radio
+deaf (steering fails with status 3, NO_NETWORK, forever). The driver drives both low when the stack
+starts. Set GPIO14 high there if you use the external antenna.
+
+## Display (XIAO Expansion Board)
+
+`Zigbeam.Display` drives the SSD1306 128x64 OLED on Seeed's XIAO Expansion Board as 8 lines of 21
+characters (5x7 font). `Zigbeam.Server` keeps a status screen on it: transport, node name, Zigbee
+state, PAN/short address, light state and the last event.
+
+```
+Zigbeam.Display.show(["hello", "world"])     # also works via ZigbeamHost.rpc/3
+```
+
+The panel sits on the XIAO I2C pins (D4 = SDA = GPIO22, D5 = SCL = GPIO23), so it cannot be combined
+with `transport: :uart`. It is driven by a bit-banged I2C NIF (`zigbeam_i2c:write/4`, in the
+firmware component) rather than AtomVM's `:i2c` port: with the Zigbee stack running, ESP-IDF's
+`i2c_driver_install` returns `ESP_FAIL` on the C6 (interrupt allocation itself still works, as
+`zigbeam_dbg:intr_try/2` shows, so the cause is elsewhere in the legacy driver). A full frame is
+about 1 kB and takes roughly 100 ms. Without the expansion board the display process stays up and
+drops frames.
+
+Debug NIFs in the firmware (handy because the console is on UART0): `zigbeam_dbg:i2c_try/3`
+(sda, scl, hz) tries the ESP-IDF I2C driver and reports each step, `zigbeam_dbg:intr_try/2`
+(source, flags) tries an interrupt allocation. `zigbeam_dbg:intr_dump/0` exists but hangs the VM.
+
+AtomVM's Elixir library lacks `Enum.take/2`, `Enum.with_index/1`, `to_charlist/1`, `Atom.to_string/1`
+and integer interpolation; the display and server code use `:lists` and `:erlang` instead.
 
 ## Known limits
 

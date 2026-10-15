@@ -29,7 +29,13 @@ if ! grep -q "clear_stale_reader" "$ATOMVM_DIR/libs/estdlib/src/serial_dist.erl"
   (cd "$ATOMVM_DIR" && git apply "$ZIGBEAM_FW_DIR/patches/0002-serial-dist-recover-stale-uart-reader.patch")
 fi
 
-# 2c. (re)build boot.avm: estdlib (incl. the patched serial_dist) + eavmlib + Elixir libs
+# 2c. net_kernel: link the setup process so a failed outgoing handshake does
+#     not leave the node stuck as pending forever
+if ! grep -q "SetupPid = ProtoDist:setup" "$ATOMVM_DIR/libs/estdlib/src/net_kernel.erl"; then
+  (cd "$ATOMVM_DIR" && git apply "$ZIGBEAM_FW_DIR/patches/0003-net-kernel-link-setup-process.patch")
+fi
+
+# 2d. (re)build boot.avm: estdlib (incl. the patched serial_dist) + eavmlib + Elixir libs
 (cd "$ATOMVM_DIR/build" && ninja elixir_esp32boot | tail -1)
 
 # 3. drop our component + partition table into the AtomVM esp32 tree
